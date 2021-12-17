@@ -14,6 +14,54 @@ const TAB_STOP: usize = 8;
 //TODO: Something wrong with tabs and cursor movement
 //Whenever I write tabs the cursor goes crazy with x-offset, maybe have a look at the cursor renderer
 
+#[macro_export]
+macro_rules! prompt {
+    ($output:expr,$($args:tt)*) => {{
+        let output: &mut Output = &mut $output;
+        let mut input = String::with_capacity(32);
+        loop {
+            output.status_message.set_message(format!($($args)*, input));
+            output.refresh_screen()?;
+            match Reader.read_key()? {
+                KeyEvent {
+                    code: KeyCode::Enter,
+                    modifiers: KeyModifiers::NONE
+                } => {
+                    if !input.is_empty(){
+                        output.status_message.set_message(String::new());
+                        break;
+                    }
+                }
+                KeyEvent {
+                    code: KeyCode::Esc,
+                    ..
+                } => {
+                    output.status_message.set_message(String::new());
+                    input.clear();
+                    break;
+                }
+                KeyEvent {
+                    code: KeyCode::Backspace | KeyCode::Delete,
+                    modifiers: KeyModifiers::NONE,
+                } => {
+                    input.pop();
+                }
+                KeyEvent {
+                    code: code @ (KeyCode::Char(..) | KeyCode::Tab),
+                    modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
+                } => input.push(match code {
+                    KeyCode::Tab => '\t',
+                    KeyCode::Char(ch) => ch,
+                    _ => unreachable!(),
+                }),
+                _ => {}
+            }
+        }
+
+        if input.is_empty() {None} else {Some(input)}
+    }};
+}
+
 struct CleanUp;
 impl Drop for CleanUp {
     fn drop(&mut self) {
@@ -126,19 +174,25 @@ impl Editor {
                 code: KeyCode::Char('s'),
                 modifiers: KeyModifiers::CONTROL,
             } => {
-                if self.output.editor_rows.filename.is_some() {
-                    self.output.editor_rows.save().map(|len| {
+                if self.output.editor_rows.filename.is_none() {
+                    let prompt: Option<PathBuf> =
+                        prompt!(&mut self.output, "Save as: {}").map(|it| it.into());
+
+                    if let None = prompt {
                         self.output
                             .status_message
-                            .set_message(format!("{} bytes written to disk", len));
-                        self.output.dirty = 0
-                    })?
-                } else {
-                    //TODO: Display save as dialoge
+                            .set_message("Save canceled".into());
+                        return Ok(true);
+                    }
+                    self.output.editor_rows.filename = prompt;
+                }
+
+                self.output.editor_rows.save().map(|len| {
                     self.output
                         .status_message
-                        .set_message(String::from("Specify a filename/path first."));
-                }
+                        .set_message(format!("{} bytes written to disk", len));
+                    self.output.dirty = 0
+                })?
             }
             KeyEvent {
                 code: key @ (KeyCode::Backspace | KeyCode::Delete),
