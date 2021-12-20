@@ -16,28 +16,34 @@ const TAB_STOP: usize = 8;
 
 #[macro_export]
 macro_rules! prompt {
-    ($output:expr,$($args:tt)*) => {{
-        let output: &mut Output = &mut $output;
+    ($output:expr,$args:tt) => {
+        prompt!($output, $args, callback = |&_, _, _| {})
+    };
+
+    ($output:expr,$args:tt, callback = $callback:expr) => {{
+        let output: &mut Output = $output;
         let mut input = String::with_capacity(32);
         loop {
-            output.status_message.set_message(format!($($args)*, input));
+            output.status_message.set_message(format!($args, input));
             output.refresh_screen()?;
-            match Reader.read_key()? {
+            let key_event = Reader.read_key()?;
+            match key_event {
                 KeyEvent {
                     code: KeyCode::Enter,
-                    modifiers: KeyModifiers::NONE
+                    modifiers: KeyModifiers::NONE,
                 } => {
-                    if !input.is_empty(){
+                    if !input.is_empty() {
                         output.status_message.set_message(String::new());
+                        $callback(output, &input, KeyCode::Enter);
                         break;
                     }
                 }
                 KeyEvent {
-                    code: KeyCode::Esc,
-                    ..
+                    code: KeyCode::Esc, ..
                 } => {
                     output.status_message.set_message(String::new());
                     input.clear();
+                    $callback(output, &input, KeyCode::Esc);
                     break;
                 }
                 KeyEvent {
@@ -56,9 +62,14 @@ macro_rules! prompt {
                 }),
                 _ => {}
             }
+            $callback(output, &input, key_event.code);
         }
 
-        if input.is_empty() {None} else {Some(input)}
+        if input.is_empty() {
+            None
+        } else {
+            Some(input)
+        }
     }};
 }
 
@@ -195,6 +206,12 @@ impl Editor {
                 })?
             }
             KeyEvent {
+                code: KeyCode::Char('f'),
+                modifiers: KeyModifiers::CONTROL,
+            } => {
+                self.output.find()?;
+            }
+            KeyEvent {
                 code: key @ (KeyCode::Backspace | KeyCode::Delete),
                 modifiers: KeyModifiers::NONE,
             } => {
@@ -246,7 +263,9 @@ impl Output {
             editor_contents: EditorContents::new(),
             cursor_controller: CursorController::new(win_size),
             editor_rows: EditorRows::new(),
-            status_message: StatusMessage::new("Help: Ctrl-Q to Quit | Ctrl-S to save".into()),
+            status_message: StatusMessage::new(
+                "Help: Ctrl-Q to Quit | Ctrl-S to save | Ctrl-F to search".into(),
+            ),
             dirty: 0,
         }
     }
@@ -434,6 +453,33 @@ impl Output {
         self.cursor_controller.cursor_x = 0;
         self.cursor_controller.cursor_y += 1;
         self.dirty += 1;
+    }
+
+    fn find_callback(output: &mut Output, keyword: &str, key_code: KeyCode) {
+        match key_code {
+            KeyCode::Esc | KeyCode::Enter => {}
+            _ => {
+                for i in 0..output.editor_rows.number_of_rows() {
+                    let row = output.editor_rows.get_editor_row(i);
+                    if let Some(index) = row.render.find(&keyword) {
+                        output.cursor_controller.cursor_y = i;
+                        output.cursor_controller.cursor_x = row.get_row_content_x(index);
+                        output.cursor_controller.row_offset = output.editor_rows.number_of_rows();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    fn find(&mut self) -> io::Result<()> {
+        prompt!(
+            self,
+            "Search: {} (ESC to cancel)",
+            callback = Output::find_callback
+        );
+
+        Ok(())
     }
 }
 
@@ -626,6 +672,20 @@ impl Row {
     fn delete_char(&mut self, at: usize) {
         self.row_content.remove(at);
         EditorRows::render_row(self)
+    }
+
+    fn get_row_content_x(&self, render_x: usize) -> usize {
+        let mut current_render_x = 0;
+        for (cursor_x, ch) in self.row_content.chars().enumerate() {
+            if ch == '\t' {
+                current_render_x += (TAB_STOP - 1) - (current_render_x % TAB_STOP);
+            }
+            current_render_x += 1;
+            if current_render_x > render_x {
+                return cursor_x;
+            }
+        }
+        0
     }
 }
 
